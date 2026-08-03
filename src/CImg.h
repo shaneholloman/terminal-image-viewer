@@ -54,7 +54,7 @@
 
 // Set version number of the library.
 #ifndef cimg_version
-#define cimg_version 401
+#define cimg_version 403
 
 /*-----------------------------------------------------------
  #
@@ -2468,11 +2468,7 @@ namespace cimg_library {
     }
 
     // Set/Get a global user_agent value.
-    inline const char* user_agent(const char *const str=0) {
-      static const char *value = "CImg";
-      if (str) { cimg::mutex(0); value = str; cimg::mutex(0,0); }
-      return value;
-    }
+    inline const char* user_agent(const char *const str=0);
 
     // Functions to return standard streams 'stdin', 'stdout' and 'stderr'.
     inline FILE* _stdin(const bool throw_exception=true);
@@ -8076,6 +8072,7 @@ namespace cimg_library {
 
       // Destroy previous display window if existing.
       if (!is_empty()) assign(false);
+      if (!dimw || !dimh) return;
 
       // Open X11 display and retrieve graphical properties.
       cimg::X11_attr &X11_attr = cimg::X11_attr::ref();
@@ -9440,6 +9437,7 @@ namespace cimg_library {
 
       // Destroy previous window if existing.
       if (!is_empty()) assign();
+      if (!dimw || !dimh) return *this;
 
       // Set display variables.
       _width = std::min(dimw,(unsigned int)screen_width());
@@ -10138,27 +10136,17 @@ namespace cimg_library {
                  const unsigned int normalization_type=3,
                  const bool is_fullscreen=false, const bool closed_flag=false) {
 
-      // Destroy previous display window if existing.
-      if (!is_empty()) assign();
-      _data = new unsigned int[_width*_height];
-
-      cimg::SDL3_attr &SDL3_attr = cimg::SDL3_attr::ref();
-      SDL3_attr.lock();
-
-      if (SDL3_attr.nb_cimg_displays>=512) {
-        SDL3_attr.unlock();
-        throw CImgDisplayException("CImgDisplay::assign(): Max number of displays (512) already opened.");
-      }
-
       // Allocate space for window title.
       const char *const np_title = p_title?p_title:"";
       const unsigned int s = (unsigned int)std::strlen(np_title) + 1;
       char *const tmp_title = s?new char[s]:0;
       if (s) std::memcpy(tmp_title,np_title,s*sizeof(char));
 
+      // Destroy previous display window if existing.
+      if (!is_empty()) assign();
+      if (!dimw || !dimh) return;
+
       // Set display variables.
-      _width = std::min(dimw,(unsigned int)screen_width());
-      _height = std::min(dimh,(unsigned int)screen_height());
       _normalization = normalization_type<4?normalization_type:3;
       _is_fullscreen = is_fullscreen;
       _window_x = _window_y = cimg::type<int>::min();
@@ -10167,6 +10155,16 @@ namespace cimg_library {
       _paint_request = false;
       _title = tmp_title;
       _thread_id = SDL_GetCurrentThreadID();
+      _width = std::min(dimw,(unsigned int)screen_width());
+      _height = std::min(dimh,(unsigned int)screen_height());
+      _data = new unsigned int[_width*_height];
+
+      cimg::SDL3_attr &SDL3_attr = cimg::SDL3_attr::ref();
+      SDL3_attr.lock();
+      if (SDL3_attr.nb_cimg_displays>=512) {
+        SDL3_attr.unlock();
+        throw CImgDisplayException("CImgDisplay::assign(): Max number of displays (512) already opened.");
+      }
       flush();
 
       // Create window and renderer.
@@ -56187,9 +56185,9 @@ namespace cimg_library {
         assign();
         if (!file) cimg::fclose(nfile);
         throw CImgIOException(_cimg_instance
-                              "load_pnm(): PNM type 'P%d' found, but type is not supported.",
+                              "load_pnm(): PNM type 'P%u' found, but type is not supported in file '%s'.",
                               cimg_instance,
-                              filename?filename:"(FILE*)",ppm_type);
+                              ppm_type,filename?filename:"(FILE*)");
       }
       if (!file) cimg::fclose(nfile);
       return *this;
@@ -56429,6 +56427,31 @@ namespace cimg_library {
         throw CImgArgumentException(_cimg_instance
                                     "load_tiff(): Specified filename is (null).",
                                     cimg_instance);
+
+      if (*filename=='-' && (!filename[1] || filename[1]=='.')) { // Input from stdin
+        CImg<charT> filename_tmp(1024);
+        do {
+          cimg_snprintf(filename_tmp,filename_tmp._width,"%s%c%s.tiff",
+                        cimg::temporary_path(),cimg_directory_separator,cimg::filenamerand());
+        } while (cimg::path_exists(filename_tmp));
+
+        // Copy stdin content to temporary file.
+        std::FILE
+          *const file = cimg::fopen(filename,"rb"),
+          *const ftmp = std::fopen(filename_tmp,"wb");
+        if (!ftmp) {
+          throw CImgIOException(_cimg_instance
+                                "load_tiff(): Failed to create temporary file '%s'.",
+                                cimg_instance,filename_tmp.data());
+        }
+        CImg<charT> buffer(65536);
+        size_t n;
+        while ((n=std::fread(buffer,1,sizeof(buffer),file))>0) std::fwrite(buffer,1,n,ftmp);
+        std::fclose(ftmp);
+        load_tiff(filename_tmp,first_frame,last_frame,step_frame,bits_per_value,voxel_size,description);
+        std::remove(filename_tmp);
+        return *this;
+      }
 
       const unsigned int
         nfirst_frame = first_frame<last_frame?first_frame:last_frame,
@@ -58071,7 +58094,7 @@ namespace cimg_library {
         throw CImgArgumentException(_cimg_instance
                                     "load_graphicsmagick_external(): Specified filename is (null) or does not exist.",
                                     cimg_instance);
-      CImg<charT> command(1024), filename_tmp(256);
+      CImg<charT> command(1024), filename_tmp(1024);
       const CImg<charT> s_filename = CImg<charT>::string(filename)._system_strescape();
 #if cimg_OS==1
       if (cimg::posix_searchpath("gm")) {
@@ -58160,7 +58183,7 @@ namespace cimg_library {
         throw CImgIOException(_cimg_instance
                               "load_gzip_external(): Specified filename is (null) or does not exist.",
                               cimg_instance);
-      CImg<charT> command(1024), filename_tmp(256), body(256);
+      CImg<charT> command(1024), filename_tmp(1024), body(1024);
       const char
         *const ext = cimg::split_filename(filename,body),
         *const ext2 = cimg::split_filename(body,0);
@@ -58214,7 +58237,7 @@ namespace cimg_library {
         throw CImgArgumentException(_cimg_instance
                                     "load_imagemagick_external(): Specified filename is (null) or does not exist.",
                                     cimg_instance);
-      CImg<charT> command(1024), filename_tmp(256);
+      CImg<charT> command(1024), filename_tmp(1024);
       const CImg<charT> s_filename = CImg<charT>::string(filename)._system_strescape();
       const char *magick_path = cimg::imagemagick_path();
 #if cimg_OS==1
@@ -58308,7 +58331,7 @@ namespace cimg_library {
         throw CImgArgumentException(_cimg_instance
                                     "load_medcon_external(): Specified filename is (null) or does not exist.",
                                     cimg_instance);
-      CImg<charT> command(1024), filename_tmp(256), body(256);
+      CImg<charT> command(1024), filename_tmp(1024), body(1024);
       do {
         cimg_snprintf(filename_tmp,filename_tmp._width,"%s.hdr",cimg::filenamerand());
       } while (cimg::path_exists(filename_tmp));
@@ -58351,7 +58374,7 @@ namespace cimg_library {
         throw CImgArgumentException(_cimg_instance
                                     "load_pdf_external(): Specified filename is (null).",
                                     cimg_instance);
-      CImg<charT> command(1024), filename_tmp(256);
+      CImg<charT> command(1024), filename_tmp(1024);
       const CImg<charT> s_filename = CImg<charT>::string(filename)._system_strescape();
 #if cimg_OS==1
       std::FILE *file = 0;
@@ -58406,7 +58429,7 @@ namespace cimg_library {
         throw CImgArgumentException(_cimg_instance
                                     "load_dcraw_external(): Specified filename is (null) or does not exist.",
                                     cimg_instance);
-      CImg<charT> command(1024), filename_tmp(256);
+      CImg<charT> command(1024), filename_tmp(1024);
       const CImg<charT> s_filename = CImg<charT>::string(filename)._system_strescape();
 #if cimg_OS==1
       cimg_snprintf(command,command._width,"%s -w -4 -c \"%s\"",
@@ -61177,6 +61200,32 @@ namespace cimg_library {
                                     cimg_instance);
       if (is_empty()) { cimg::fempty(0,filename); return *this; }
 
+      if (*filename=='-' && (!filename[1] || filename[1]=='.')) { // Output to stdout
+        CImg<charT> filename_tmp(1024);
+        do {
+          cimg_snprintf(filename_tmp,filename_tmp._width,"%s%c%s.tiff",
+                        cimg::temporary_path(),cimg_directory_separator,cimg::filenamerand());
+        } while (cimg::path_exists(filename_tmp));
+        save_tiff(filename_tmp,compression_type,voxel_size,description,use_bigtiff);
+
+        // Copy file content to stdout.
+        std::FILE
+          *const ftmp = std::fopen(filename_tmp,"rb"),
+          *const file = cimg::fopen(filename,"wb");
+        if (!ftmp) {
+          std::remove(filename_tmp);
+          throw CImgIOException(_cimg_instance "save_tiff(): Failed to reopen temporary file '%s'.",
+                                cimg_instance,filename_tmp._data);
+        }
+        CImg<charT> buffer(65536);
+        size_t n;
+        while ((n=std::fread(buffer,1,sizeof(buffer),ftmp))>0) std::fwrite(buffer,1,n,file);
+        std::fclose(ftmp);
+        cimg::fclose(file);
+        std::remove(filename_tmp);
+        return *this;
+      }
+
 #ifdef cimg_use_tiff
       const bool
         _use_bigtiff = use_bigtiff && sizeof(ulongT)>=8 && size()*sizeof(T)>=1UL<<31; // No bigtiff for small images
@@ -62125,7 +62174,7 @@ namespace cimg_library {
                                     cimg_instance);
       if (is_empty()) { cimg::fempty(0,filename); return *this; }
 
-      CImg<charT> command(1024), filename_tmp(256), body(256);
+      CImg<charT> command(1024), filename_tmp(1024), body(1024);
       const char
         *ext = cimg::split_filename(filename,body),
         *ext2 = cimg::split_filename(body,0);
@@ -62189,7 +62238,7 @@ namespace cimg_library {
 #define _cimg_sge_extension1 "pgm"
 #define _cimg_sge_extension2 "ppm"
 #endif
-      CImg<charT> command(1024), filename_tmp(256);
+      CImg<charT> command(1024), filename_tmp(1024);
       do {
         cimg_snprintf(filename_tmp,filename_tmp._width,"%s%c%s.%s",
                       cimg::temporary_path(),cimg_directory_separator,cimg::filenamerand(),
@@ -62246,7 +62295,7 @@ namespace cimg_library {
 #define _cimg_sie_extension1 "pgm"
 #define _cimg_sie_extension2 "ppm"
 #endif
-      CImg<charT> command(1024), filename_tmp(256);
+      CImg<charT> command(1024), filename_tmp(1024);
       do {
         cimg_snprintf(filename_tmp,filename_tmp._width,"%s%c%s.%s",cimg::temporary_path(),
                       cimg_directory_separator,cimg::filenamerand(),
@@ -62293,7 +62342,7 @@ namespace cimg_library {
                                     cimg_instance);
       if (is_empty()) { cimg::fempty(0,filename); return *this; }
 
-      CImg<charT> command(1024), filename_tmp(256), body(256);
+      CImg<charT> command(1024), filename_tmp(1024), body(1024);
       do {
         cimg_snprintf(filename_tmp,filename_tmp._width,"%s.hdr",cimg::filenamerand());
       } while (cimg::path_exists(filename_tmp));
@@ -65865,7 +65914,7 @@ namespace cimg_library {
         throw CImgArgumentException(_cimglist_instance
                                     "load_ffmpeg_external(): Specified filename is (null) or does not exist.",
                                     cimglist_instance);
-      CImg<charT> command(1024), filename_tmp(256), filename_tmp2(256);
+      CImg<charT> command(1024), filename_tmp(1024), filename_tmp2(1024);
       do {
         cimg_snprintf(filename_tmp,filename_tmp._width,"%s%c%s",
                       cimg::temporary_path(),cimg_directory_separator,cimg::filenamerand());
@@ -65926,7 +65975,7 @@ namespace cimg_library {
     }
 
     CImgList<T>& _load_gif_external(const char *const filename, const bool use_graphicsmagick=false) {
-      CImg<charT> command(1024), filename_tmp(256), filename_tmp2(256);
+      CImg<charT> command(1024), filename_tmp(1024), filename_tmp2(1024);
       do {
         cimg_snprintf(filename_tmp,filename_tmp._width,"%s%c%s",
                       cimg::temporary_path(),cimg_directory_separator,cimg::filenamerand());
@@ -65980,7 +66029,7 @@ namespace cimg_library {
         throw CImgIOException(_cimglist_instance
                               "load_gzip_external(): Specified filename is (null) or does not exist.",
                               cimglist_instance);
-      CImg<charT> command(1024), filename_tmp(256), body(256);
+      CImg<charT> command(1024), filename_tmp(1024), body(1024);
       const char
         *ext = cimg::split_filename(filename,body),
         *ext2 = cimg::split_filename(body,0);
@@ -66038,6 +66087,36 @@ namespace cimg_library {
                            const unsigned int first_frame=0, const unsigned int last_frame=~0U,
                            const unsigned int step_frame=1, unsigned int *const bits_per_value=0,
                            float *const voxel_size=0, CImg<charT> *const description=0) {
+      if (!filename)
+        throw CImgArgumentException(_cimglist_instance
+                                    "load_tiff(): Specified filename is (null).",
+                                    cimglist_instance);
+
+      if (*filename=='-' && (!filename[1] || filename[1]=='.')) { // Input from stdin
+        CImg<charT> filename_tmp(1024);
+        do {
+          cimg_snprintf(filename_tmp,filename_tmp._width,"%s%c%s.tiff",
+                        cimg::temporary_path(),cimg_directory_separator,cimg::filenamerand());
+        } while (cimg::path_exists(filename_tmp));
+
+        // Copy stdin content to temporary file.
+        std::FILE
+          *const file = cimg::fopen(filename,"rb"),
+          *const ftmp = std::fopen(filename_tmp,"wb");
+        if (!ftmp) {
+          throw CImgIOException(_cimglist_instance
+                                "load_tiff(): Failed to create temporary file '%s'.",
+                                cimglist_instance,filename_tmp.data());
+        }
+        CImg<charT> buffer(65536);
+        size_t n;
+        while ((n=std::fread(buffer,1,sizeof(buffer),file))>0) std::fwrite(buffer,1,n,ftmp);
+        std::fclose(ftmp);
+        load_tiff(filename_tmp,first_frame,last_frame,step_frame,bits_per_value,voxel_size,description);
+        std::remove(filename_tmp);
+        return *this;
+      }
+
       const unsigned int
         nfirst_frame = first_frame<last_frame?first_frame:last_frame,
         nstep_frame = step_frame?step_frame:1;
@@ -66047,8 +66126,7 @@ namespace cimg_library {
       if (nfirst_frame || nlast_frame!=~0U || nstep_frame!=1)
         throw CImgArgumentException(_cimglist_instance
                                     "load_tiff(): Unable to load sub-images from file '%s' unless libtiff is enabled.",
-                                    cimglist_instance,
-                                    filename);
+                                    cimglist_instance,filename);
 
       return assign(CImg<T>::get_load_tiff(filename));
 #else
@@ -66422,7 +66500,7 @@ namespace cimg_library {
     **/
     const CImgList<T>& save_gif_external(const char *const filename, const float fps=25,
                                          const unsigned int nb_loops=0) {
-      CImg<charT> command(1024), filename_tmp(256), filename_tmp2(256);
+      CImg<charT> command(1024), filename_tmp(1024), filename_tmp2(1024);
       CImgList<charT> filenames;
 
 #ifdef cimg_use_png
@@ -66845,6 +66923,32 @@ namespace cimg_library {
                                     cimglist_instance);
       if (is_empty()) { cimg::fempty(0,filename); return *this; }
 
+      if (*filename=='-' && (!filename[1] || filename[1]=='.')) { // Output to stdout
+        CImg<charT> filename_tmp(1024);
+        do {
+          cimg_snprintf(filename_tmp,filename_tmp._width,"%s%c%s.tiff",
+                        cimg::temporary_path(),cimg_directory_separator,cimg::filenamerand());
+        } while (cimg::path_exists(filename_tmp));
+        save_tiff(filename_tmp,compression_type,voxel_size,description,use_bigtiff);
+
+        // Copy file content to stdout.
+        std::FILE
+          *const ftmp = std::fopen(filename_tmp,"rb"),
+          *const file = cimg::fopen(filename,"wb");
+        if (!ftmp) {
+          std::remove(filename_tmp);
+          throw CImgIOException(_cimglist_instance "save_tiff(): Failed to reopen temporary file '%s'.",
+                                cimglist_instance,filename_tmp._data);
+        }
+        CImg<charT> buffer(65536);
+        size_t n;
+        while ((n=std::fread(buffer,1,sizeof(buffer),ftmp))>0) std::fwrite(buffer,1,n,file);
+        std::fclose(ftmp);
+        cimg::fclose(file);
+        std::remove(filename_tmp);
+        return *this;
+      }
+
 #ifndef cimg_use_tiff
       if (_width==1) _data[0].save_tiff(filename,compression_type,voxel_size,description,use_bigtiff);
       else cimglist_for(*this,l) {
@@ -66887,7 +66991,7 @@ namespace cimg_library {
         throw CImgIOException(_cimglist_instance
                               "save_gzip_external(): Specified filename is (null).",
                               cimglist_instance);
-      CImg<charT> command(1024), filename_tmp(256), body(256);
+      CImg<charT> command(1024), filename_tmp(1024), body(1024);
       const char
         *ext = cimg::split_filename(filename,body),
         *ext2 = cimg::split_filename(body,0);
@@ -67082,7 +67186,7 @@ namespace cimg_library {
         !cimg::strcasecmp(ext,"flv")?"flv":
         !cimg::strcasecmp(ext,"mp4")?"h264":"mpeg2video";
 
-      CImg<charT> command(1024), filename_tmp(256), filename_tmp2(256);
+      CImg<charT> command(1024), filename_tmp(1024), filename_tmp2(1024);
       CImgList<charT> filenames;
       cimglist_for(*this,l) if (!_data[l].is_sameXYZ(_data[0]))
         throw CImgInstanceException(_cimglist_instance
@@ -67648,6 +67752,13 @@ namespace cimg_library {
         std::fprintf(cimg::output(),"\n%s[CImg] *** Warning ***%s%s\n",cimg::t_red(),cimg::t_normal(),message._data);
 #endif
       }
+    }
+
+    //! Set/Get a global user_agent value.
+    inline const char* user_agent(const char *const str) {
+      static CImg<char> value = CImg<char>::string("CImg");
+      if (str) { cimg::mutex(0); CImg<char>::string(str).move_to(value); cimg::mutex(0,0); }
+      return value;
     }
 
     //! Search path of an executable.
@@ -68253,7 +68364,7 @@ namespace cimg_library {
       } else if (!s_path) {
         s_path.assign(1024);
         bool path_found = false;
-        CImg<char> tmp(1024), filename_tmp(256);
+        CImg<char> tmp(1024), filename_tmp(1024);
         std::FILE *file = 0;
         cimg_snprintf(filename_tmp,filename_tmp._width,"%s.tmp",cimg::filenamerand());
         char *tmpPath = std::getenv("TMP");
