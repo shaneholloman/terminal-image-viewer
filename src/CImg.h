@@ -54,7 +54,7 @@
 
 // Set version number of the library.
 #ifndef cimg_version
-#define cimg_version 404
+#define cimg_version 405
 
 /*-----------------------------------------------------------
  #
@@ -16268,7 +16268,18 @@ namespace cimg_library {
           variable_name.assign();
         }
         if (is_sth && nb) val = -val;
-        else if (!nb) nb = cimg_sscanf(ss,"%lf%c%c",&val,&(sep=0),&(end=0));
+        else if (!nb) { // Equivalent (but faster) to 'nb = cimg_sscanf(ss,"%lf%c%c",&val,&(sep=0),&(end=0))'
+          char *nptr = 0;
+          sep = 0; end = 0;
+          val = std::strtod(ss,&nptr);
+          if (nptr==ss) nb = 0; // No valid number found
+          else if (!*nptr) nb = 1; // Number alone, nothing following
+          else {
+            sep = *nptr;
+            if (!*(nptr + 1)) nb = 2; // One character following the number
+            else { end = *(nptr + 1); nb = 3; } // Two characters following the number
+          }
+        }
         if (nb==1) _cimg_mp_const_scalar(val);
         if (nb==2 && sep=='%') _cimg_mp_const_scalar(val/100);
 
@@ -30939,27 +30950,32 @@ namespace cimg_library {
 
     // Return 'true' is a single 'value' or '!value' has been successfully read ('value' being a double or { w,h,d,s }).
     bool __eval_get(const char* &ptr, double &value) const {
-      int n = 0;
       while (*ptr && cimg::is_blank(*ptr)) ++ptr;
 
       bool is_not = false; // Detect preceding '!' operator
       if (*ptr=='!') { is_not = true; ++ptr; while (*ptr && cimg::is_blank(*ptr)) ++ptr; }
 
-      if ((*ptr=='w' || *ptr=='h' || *ptr=='d' || *ptr=='s' || *ptr=='r') || cimg_sscanf(ptr,"%lf %n",&value,&n)==1) {
-        if (!n) {
-          switch (*ptr) {
-          case 'w': value = (double)_width; break;
-          case 'h': value = (double)_height; break;
-          case 'd': value = (double)_depth; break;
-          case 's': value = (double)_spectrum; break;
-          case 'r': value = (double)_is_shared; break;
-          }
-          ++ptr; while (*ptr && cimg::is_blank(*ptr)) ++ptr;
-        } else ptr+=n;
+      // Special case for the reserved letters 'w','h','d','s','r'.
+      if (*ptr=='w' || *ptr=='h' || *ptr=='d' || *ptr=='s' || *ptr=='r') {
+        switch (*ptr) {
+        case 'w': value = (double)_width; break;
+        case 'h': value = (double)_height; break;
+        case 'd': value = (double)_depth; break;
+        case 's': value = (double)_spectrum; break;
+        case 'r': value = (double)_is_shared; break;
+        }
+        ++ptr; while (*ptr && cimg::is_blank(*ptr)) ++ptr;
         if (is_not) value = (double)!value;
         return true;
       }
-      return false;
+
+      // General case: read a double value with strtod (no allocation, no exception).
+      char *end = 0;
+      value = std::strtod(ptr,&end);
+      if (end==ptr) return false;
+      ptr = end; while (*ptr && cimg::is_blank(*ptr)) ++ptr;
+      if (is_not) value = (double)!value;
+      return true;
     }
 
     double _eval(CImg<T> *const img_output, const char *const expression,
@@ -44390,7 +44406,7 @@ namespace cimg_library {
                                   const float smoothness=0.1f, const float precision=7.f,
                                   const unsigned int nb_scales=0, const unsigned int iteration_max=1000,
                                   const bool is_forward=false,
-                                  const CImg<floatT>& guide=CImg<floatT>::const_empty()) const {
+                                  const CImg<Tfloat>& guide=CImg<Tfloat>::const_empty()) const {
       if (is_empty() || !reference) return +*this;
       if (!is_sameXYZC(reference))
         throw CImgArgumentException(_cimg_instance
@@ -44460,7 +44476,7 @@ namespace cimg_library {
         V.assign(sw,sh,sd,U._spectrum); // Allocate V.
         const CImgList<Tfloat> grad = (is_forward?I:R).get_gradient(is_3d?"xyz":"xy",0);
 
-        double prev_energy = cimg::type<float>::max(), dt = 0.5;
+        double prev_energy = cimg::type<double>::max(), dt = 0.5;
 
         const unsigned int nb_iterations = iteration_max==~0U?~0U:(iteration_max*fact);
         cimg_abort_init;
@@ -44614,7 +44630,7 @@ namespace cimg_library {
           // Update displacement field.
           Tfloat Vmin,Vmax = V.max_min(Vmin);
           const double dt_iteration = dt/cimg::max((Tfloat)1e-8,cimg::abs(Vmin),cimg::abs(Vmax));
-          cimg_openmp_for(U,*ptr + dt_iteration*V[ptr - U._data],32768,float);
+          cimg_openmp_for(U,*ptr + dt_iteration*V[ptr - U._data],32768,Tfloat);
 
           // Force guided constraints even a bit more to speed up convergence.
           if (C) U.draw_image(0,0,0,0,Cv,Cm,1,1);
@@ -56073,10 +56089,12 @@ namespace cimg_library {
                                     cimg_instance);
 
       std::FILE *const nfile = file?file:cimg::fopen(filename,"rb");
-      unsigned int ppm_type, W, H, D = 1, colormax = 255;
+      unsigned int ppm_type, W, H, D = ~0U, colormax = ~0U;
       CImg<charT> item(16384,1,1,1,0);
       int err, rval, gval, bval;
       const longT cimg_iobuffer = (longT)24*1024*1024;
+
+      // Read PNM type.
       while ((err=std::fscanf(nfile,"%16383[^\n]",item.data()))!=EOF && (*item=='#' || !err)) std::fgetc(nfile);
       if (cimg_sscanf(item._data," P%u",&ppm_type)!=1) {
         if (!file) cimg::fclose(nfile);
@@ -56085,6 +56103,8 @@ namespace cimg_library {
                               cimg_instance,
                               filename?filename:"(FILE*)");
       }
+
+      // Read image dimensions (and opt. 'colormax', if defined on the same line).
       while ((err=std::fscanf(nfile," %16383[^\n]",item.data()))!=EOF && (*item=='#' || !err)) std::fgetc(nfile);
       if ((err=cimg_sscanf(item._data," %u %u %u %u",&W,&H,&D,&colormax))<2) {
         if (!file) cimg::fclose(nfile);
@@ -56093,19 +56113,37 @@ namespace cimg_library {
                               cimg_instance,
                               filename?filename:"(FILE*)");
       }
-      if (ppm_type!=1 && ppm_type!=4) {
-        if (err==2 || (err==3 && (ppm_type==5 || ppm_type==7 || ppm_type==8 || ppm_type==9))) {
+
+      // If input file is 'stdin', assume it is not a 3D image, but rather that
+      // 'colormax' has been defined on the same line as the image dimensions.
+      if (D!=~0U && colormax==~0U && nfile==cimg::_stdin()) { colormax = D; D = 1; }
+
+      // Read 'colormax' field.
+      if (colormax==~0U && ppm_type!=1 && ppm_type!=4) {
+        if (ppm_type>=5 && ppm_type<=9) {
+          const long pos = std::ftell(nfile); // Potential return point (for non-stdin input)
           while ((err=std::fscanf(nfile," %16383[^\n]",item.data()))!=EOF && (*item=='#' || !err)) std::fgetc(nfile);
-          if (cimg_sscanf(item._data,"%u",&colormax)!=1)
-            cimg::warn(_cimg_instance
-                       "load_pnm(): COLORMAX field is undefined in file '%s'.",
-                       cimg_instance,
-                       filename?filename:"(FILE*)");
+          if (cimg_sscanf(item._data,"%u",&colormax)!=1) {
+            if (nfile==cimg::_stdin()) // COLORMAX cannot be undefined for 'stdin' input
+              throw CImgIOException(_cimg_instance
+                                    "load_pnm(): COLORMAX field is undefined in file '%s'.",
+                                    cimg_instance,
+                                    filename?filename:"(FILE*)");
+            std::fseek(nfile,pos,SEEK_SET);
+            if (D!=~0U) { colormax = D; D = 1; }
+            else cimg::warn(_cimg_instance
+                            "load_pnm(): COLORMAX field is undefined in file '%s'.",
+                            cimg_instance,
+                            filename?filename:"(FILE*)");
+          }
         } else { colormax = D; D = 1; }
       }
       std::fgetc(nfile);
+      if (colormax==~0U) colormax = 255;
+      if (D==~0U) D = 1;
 
-      if (filename) { // Check that the dimensions specified in file do not exceed the buffer dimensions
+      if (filename && nfile!=cimg::_stdin()) {
+        // Check that the dimensions specified in file do not exceed the buffer dimensions
         const cimg_int64 siz = cimg::fsize(filename);
         if ((cimg_int64)W*H*D>siz)
           throw CImgIOException(_cimg_instance
@@ -57015,34 +57053,34 @@ namespace cimg_library {
       const size_t pdim = (size_t)dimx*dimy*dimz*dimv;
       switch (datatype) {
       case 2 : {
-        CImg<ucharT> _buffer(pdim);
+        CImg<ucharT> _buffer((unsigned int)pdim);
         unsigned char *const buffer = _buffer._data;
         cimg::fread(buffer,pdim,nfile);
         cimg_foroff(*this,off) _data[off] = (T)(buffer[off]*scalefactor);
       } break;
       case 4 : {
-        CImg<shortT> _buffer(pdim);
+        CImg<shortT> _buffer((unsigned int)pdim);
         short *const buffer = _buffer._data;
         cimg::fread(buffer,pdim,nfile);
         if (endian) cimg::invert_endianness(buffer,pdim);
         cimg_foroff(*this,off) _data[off] = (T)(buffer[off]*scalefactor);
       } break;
       case 8 : {
-        CImg<intT> _buffer(pdim);
+        CImg<intT> _buffer((unsigned int)pdim);
         int *const buffer = _buffer._data;
         cimg::fread(buffer,pdim,nfile);
         if (endian) cimg::invert_endianness(buffer,pdim);
         cimg_foroff(*this,off) _data[off] = (T)(buffer[off]*scalefactor);
       } break;
       case 16 : {
-        CImg<floatT> _buffer(pdim);
+        CImg<floatT> _buffer((unsigned int)pdim);
         float *const buffer = _buffer._data;
         cimg::fread(buffer,pdim,nfile);
         if (endian) cimg::invert_endianness(buffer,pdim);
         cimg_foroff(*this,off) _data[off] = (T)(buffer[off]*scalefactor);
       } break;
       case 64 : {
-        CImg<doubleT> _buffer(pdim);
+        CImg<doubleT> _buffer((unsigned int)pdim);
         double *const buffer = _buffer._data;
         cimg::fread(buffer,pdim,nfile);
         if (endian) cimg::invert_endianness(buffer,pdim);
@@ -62128,45 +62166,48 @@ namespace cimg_library {
       cimglist_for(primitives,l) {
         const CImg<tc>& color = l<colors.width()?colors[l]:default_color;
         const unsigned int psiz = primitives[l].size(), csiz = color.size();
-        const float r = color[0]/255.f, g = (csiz>1?color[1]:r)/255.f, b = (csiz>2?color[2]:g)/255.f;
+        const double
+          r = (double)color[0]/255.,
+          g = (csiz>1?(double)color[1]:r)/255.,
+          b = (csiz>2?(double)color[2]:g)/255.;
         switch (psiz) {
-        case 1 : std::fprintf(nfile,"1 %u %f %f %f\n",
+        case 1 : std::fprintf(nfile,"1 %u %lf %lf %lf\n",
                               (unsigned int)primitives(l,0),r,g,b); break;
-        case 2 : std::fprintf(nfile,"2 %u %u %f %f %f\n",
+        case 2 : std::fprintf(nfile,"2 %u %u %lf %lf %lf\n",
                               (unsigned int)primitives(l,0),(unsigned int)primitives(l,1),r,g,b); break;
-        case 3 : std::fprintf(nfile,"3 %u %u %u %f %f %f\n",
+        case 3 : std::fprintf(nfile,"3 %u %u %u %lf %lf %lf\n",
                               (unsigned int)primitives(l,0),(unsigned int)primitives(l,2),
                               (unsigned int)primitives(l,1),r,g,b); break;
-        case 4 : std::fprintf(nfile,"4 %u %u %u %u %f %f %f\n",
+        case 4 : std::fprintf(nfile,"4 %u %u %u %u %lf %lf %lf\n",
                               (unsigned int)primitives(l,0),(unsigned int)primitives(l,3),
                               (unsigned int)primitives(l,2),(unsigned int)primitives(l,1),r,g,b); break;
         case 5 : break;
         case 6 : {
           const unsigned int xt = (unsigned int)primitives(l,2), yt = (unsigned int)primitives(l,3);
-          const float
-            rt = color.atXY(xt,yt,0)/255.f,
-            gt = (csiz>1?color.atXY(xt,yt,1):r)/255.f,
-            bt = (csiz>2?color.atXY(xt,yt,2):g)/255.f;
-          std::fprintf(nfile,"2 %u %u %f %f %f\n",
+          const double
+            rt = (double)color.atXY(xt,yt,0)/255.,
+            gt = (csiz>1?(double)color.atXY(xt,yt,1):r)/255.,
+            bt = (csiz>2?(double)color.atXY(xt,yt,2):g)/255.;
+          std::fprintf(nfile,"2 %u %u %lf %lf %lf\n",
                        (unsigned int)primitives(l,0),(unsigned int)primitives(l,1),rt,gt,bt);
         } break;
         case 9 : {
           const unsigned int xt = (unsigned int)primitives(l,3), yt = (unsigned int)primitives(l,4);
-          const float
-            rt = color.atXY(xt,yt,0)/255.f,
-            gt = (csiz>1?color.atXY(xt,yt,1):r)/255.f,
-            bt = (csiz>2?color.atXY(xt,yt,2):g)/255.f;
-          std::fprintf(nfile,"3 %u %u %u %f %f %f\n",
+          const double
+            rt = (double)color.atXY(xt,yt,0)/255.,
+            gt = (csiz>1?(double)color.atXY(xt,yt,1):r)/255.,
+            bt = (csiz>2?(double)color.atXY(xt,yt,2):g)/255.;
+          std::fprintf(nfile,"3 %u %u %u %lf %lf %lf\n",
                        (unsigned int)primitives(l,0),(unsigned int)primitives(l,2),
                        (unsigned int)primitives(l,1),rt,gt,bt);
         } break;
         case 12 : {
           const unsigned int xt = (unsigned int)primitives(l,4), yt = (unsigned int)primitives(l,5);
-          const float
-            rt = color.atXY(xt,yt,0)/255.f,
-            gt = (csiz>1?color.atXY(xt,yt,1):r)/255.f,
-            bt = (csiz>2?color.atXY(xt,yt,2):g)/255.f;
-          std::fprintf(nfile,"4 %u %u %u %u %f %f %f\n",
+          const double
+            rt = (double)color.atXY(xt,yt,0)/255.,
+            gt = (csiz>1?(double)color.atXY(xt,yt,1):r)/255.,
+            bt = (csiz>2?(double)color.atXY(xt,yt,2):g)/255.;
+          std::fprintf(nfile,"4 %u %u %u %u %lf %lf %lf\n",
                        (unsigned int)primitives(l,0),(unsigned int)primitives(l,3),
                        (unsigned int)primitives(l,2),(unsigned int)primitives(l,1),rt,gt,bt);
         } break;
@@ -68881,18 +68922,20 @@ namespace cimg_library {
       if (!try_fallback) throw CImgIOException("cimg::load_network(): Failed to load file '%s' with libcurl.",url);
 #endif
 
-      CImg<char> command((unsigned int)std::strlen(url) + 1024), s_referer, s_timeout;
+      CImg<char> command((unsigned int)std::strlen(url) + 1024), s_referer, s_timeout,
+        s_url = CImg<char>::string(url)._system_strescape(),
+        s_user_agent = CImg<char>::string(_user_agent)._system_strescape();
       cimg::unused(try_fallback);
 
       // Try with 'curl' first.
       if (timeout) cimg_snprintf(s_timeout.assign(64),64,"-m %u ",timeout);
       else s_timeout.assign(1,1,1,1,0);
-      if (referer) cimg_snprintf(s_referer.assign(1024),1024,"-e %s ",referer);
+      if (referer)
+        cimg_snprintf(s_referer.assign(1024),1024,"-e \"%s\" ",CImg<char>::string(referer)._system_strescape()._data);
       else s_referer.assign(1,1,1,1,0);
       cimg_snprintf(command,command._width,
                     "\"%s\" -L --max-redirs 20 %s%s-A \"%s\" -f --silent --compressed -o \"%s\" \"%s\"",
-                    cimg::curl_path(),s_timeout._data,s_referer._data,_user_agent,filename_local,
-                    CImg<char>::string(url)._system_strescape().data());
+                    cimg::curl_path(),s_timeout._data,s_referer._data,s_user_agent._data,filename_local,s_url._data);
       cimg::system(command,cimg::curl_path());
 
 #if cimg_OS==2
@@ -68904,8 +68947,8 @@ namespace cimg_library {
         cimg_snprintf(command,command._width,
                       "\"%s\" -NonInteractive -Command Invoke-WebRequest %s%s-UserAgent \"%s\" -OutFile \"%s\" "
                       "-Uri \"%s\"",
-                      cimg::powershell_path(),s_timeout._data,s_referer._data,_user_agent,filename_local,
-                      CImg<char>::string(url)._system_strescape().data());
+                      cimg::powershell_path(),s_timeout._data,s_referer._data,s_user_agent._data,filename_local,
+                      s_url._data);
         cimg::system(command,cimg::powershell_path());
       }
 #endif
@@ -68917,8 +68960,7 @@ namespace cimg_library {
         else s_referer.assign(1,1,1,1,0);
         cimg_snprintf(command,command._width,
                       "\"%s\" --max-redirect=20 %s%s--user-agent=\"%s\" -q -r -l 0 --no-cache -O \"%s\" \"%s\"",
-                      cimg::wget_path(),s_timeout._data,s_referer._data,_user_agent,filename_local,
-                      CImg<char>::string(url)._system_strescape().data());
+                      cimg::wget_path(),s_timeout._data,s_referer._data,s_user_agent._data,filename_local,s_url._data);
         cimg::system(command,cimg::wget_path());
 
         if (cimg::fsize(filename_local)<=0)
@@ -70318,7 +70360,7 @@ namespace cimg_library {
         cimg::mutex(0);
         const size_t s0 = std::strlen(chunk0), s1 = std::strlen(chunk1);
         if (!value) {
-          value.assign(s0 + s1 + 1);
+          value.assign((unsigned int)(s0 + s1 + 1));
           std::memcpy(value._data,chunk0,s0);
           std::memcpy(value._data + s0,chunk1,s1 + 1);
         }
@@ -71320,7 +71362,7 @@ namespace cimg_library {
         cimg::mutex(0);
         const size_t s0 = std::strlen(chunk0), s1 = std::strlen(chunk1);
         if (!value) {
-          value.assign(s0 + s1 + 1);
+          value.assign((unsigned int)(s0 + s1 + 1));
           std::memcpy(value._data,chunk0,s0);
           std::memcpy(value._data + s0,chunk1,s1 + 1);
         }
